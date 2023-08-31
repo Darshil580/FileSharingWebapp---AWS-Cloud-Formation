@@ -1,0 +1,587 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Parameters:
+  #Frontend Stack information : Elastic Beanstalk
+  SolutionStackName:
+    Type: String
+    Default: "64bit Amazon Linux 2 v5.8.3 running Node.js 18"
+    Description: Elastic Beanstalk solution stack to use for the environment
+
+  # Getting Code from S3 for frontend and backend
+  CodeBucketName:
+    Description: Name of the S3 bucket where your backend code is located
+    Type: String
+    Default: term-project-code
+
+  #Reference to S3 Bucket file name for backend
+  BackendCodeKey:
+    Description: Object key of the backend code in the S3 bucket
+    Type: String
+    Default: backend.zip
+
+  #Reference to S3 Bucket file name for frontend
+  FrontendCodeKey:
+    Description: Object key of the frontend code in the S3 bucket
+    Type: String
+    Default: frontend.zip
+
+  #Reference to the code for cronjob script which runs in the background to check the database
+  CronWorkCodeKey:
+    Description: Object key of the lambda code in the S3 bucket
+    Type: String
+    Default: index.zip
+
+  # For Debugging purpose of EC2 to have access to Ec2 from ssh.
+  MyEC2KeyPair:
+    Description: Name of an existing EC2 KeyPair to enable SSH access
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: darshil
+
+  # AWS Credential to set on to EC2, so that aws-sdk can have access to AWS services
+  ACCESSKEY:
+    Type: String
+    Default: ASIAYTTALVN3FNIBP36G
+
+  SECRETACCESS:
+    Type: String
+    Default: 7F6VbhmDyi1ZyrMDO2arCRI/yCaK4JhaX1Chg/m7
+
+  SESSION:
+    Type: String
+    Default: FwoGZXIvYXdzEFQaDNR5zNUmywkM3280JCLAAS/BlfJ13Y4tUhQia0Pe1OTbYZVsRoMAQTtThemUAUol3KYXIDPhrp220JQUUR5oKMcaY54Ttd7B0yA17xo0E/1SUwzYOG6zaMdSDFUUMGqzK0DAdK4TmqlzgcWyQ38hcOiFOXzAuF3mYQbs+GfaFvyd4K+NjTBQlxyHaZBf/RDHbFFD6wSUSrOwh5N0CKtBl5pmzq11zorBMm8m0GHlOVR6wksTYlmFE1FG+lX9s1OBVBgHxVpZNv/YNs4iipNVgSjFmqWmBjItoW50+uj4+Il48Vu2LWBVNYu4sEJKcxxcRl6U6nhI2MHBuyuHG9hmr8DbG26O
+
+Resources:
+  # TO Store the Metadata of the uploaded files and link expiration time etc.
+  StorageRecordsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: files_metadata
+      AttributeDefinitions:
+        - AttributeName: accessCode
+          AttributeType: S
+      KeySchema:
+        - AttributeName: accessCode
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1 # Adjust this value based on your workload
+
+  # TO Store the uploaded file for sharing to S3 Bucket.
+  MyS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: term-project-storage
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+
+  # TO Make file accessible when object URL is given
+  MyS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref MyS3Bucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Action:
+            - "s3:GetObject"
+            - "s3:PutObject"
+          Effect: Allow
+          Resource: !Join ["", ["arn:aws:s3:::", !Ref MyS3Bucket, "/*"]]
+          Principal: "*"
+
+  # Since my Application is Tempaorary file sharing app, after every minute this lambda function will be called to check the file status DynamoDB
+  CronWork:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: CronWork
+      Runtime: nodejs18.x
+      Handler: index.handler
+      Code:
+        S3Bucket: !Ref CodeBucketName
+        S3Key: !Ref CronWorkCodeKey
+      Timeout: 30
+      Role: "arn:aws:iam::591833836406:role/LabRole"
+
+  # Event Bridge for lambda to be called at Every 1 minute
+  CronJobScheduler:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "Trigger Lambda every single minute"
+      ScheduleExpression: "rate(1 minute)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt CronWork.Arn
+          Id: CronWorkTarget
+
+  CronJobSchedulerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt CronWork.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CronJobScheduler.Arn
+
+  FeedbackSNS:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: "feedback"
+      DisplayName: "Feedback/Indqiries"
+
+  SnsEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref FeedbackSNS
+      Protocol: email
+      Endpoint: Darshil.Patel@dal.ca
+
+  ################################################################################
+  #Backend EC2 with API GATEWAY.....................................
+  ################################################################################
+
+  MyEC2Instance:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      ImageId: "ami-0f34c5ae932e6f0e4"
+      InstanceType: "t2.micro"
+      KeyName: !Ref MyEC2KeyPair
+      Tags:
+        - Key: Name
+          Value: term-project-backend
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          cd /home/ec2-user/
+          # Install Node.js 18.x using yum
+          curl -sL https://rpm.nodesource.com/setup_18.x | bash -
+          yum install -y nodejs
+          sudo yum install git -y
+
+          #!/bin/bash
+          echo export aws_access_key_id=${ACCESSKEY} >> /etc/profile
+          echo export aws_secret_access_key=${SECRETACCESS} >> /etc/profile
+          echo export aws_session_token=${SESSION} >> /etc/profile
+          sudo mkdir .aws
+          sudo chown -R ec2-user: .aws
+          sudo chmod -R 755 .aws
+
+          echo -e "[default]\naws_access_key_id=${ACCESSKEY}\naws_secret_access_key=${SECRETACCESS}\naws_session_token=${SESSION}" > .aws/credentials
+          sudo aws configure set aws_access_key_id $aws_access_key_id
+          sudo aws configure set aws_secret_access_key $aws_secret_access_key
+          sudo aws configure set region us-east-1
+          sudo aws configure set aws_session_token $aws_session_token
+
+          echo "[default]" >> ~/.aws/credentials
+          echo "aws_access_key_id=${ACCESSKEY}" >> ~/.aws/credentials
+          echo "aws_secret_access_key=${SECRETACCESS}" >> ~/.aws/credentials
+          echo "aws_session_token=${SESSION}" >> ~/.aws/credentials
+
+          sudo aws s3 cp s3://${CodeBucketName}/${BackendCodeKey} ./
+          # git clone https://github.com/Darshil580/term-backend.git
+
+          sudo unzip backend.zip -d /home/ec2-user/backend
+          cd backend
+          # cd term-backend/
+
+          sudo npm install
+          sudo npm install -g pm2
+          sudo pm2 install pm2-logrotate
+          sudo pm2 start app.js --name node-app
+          # sudo aws s3 cp s3://term-project-code/backend.zip ./ &
+
+  #API Gateway  Name
+  MyApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: backend-server
+      EndpointConfiguration:
+        Types:
+          - "REGIONAL"
+
+  #Creating a Resource called backend
+  MyApiResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MyApiGateway
+      ParentId: !GetAtt MyApiGateway.RootResourceId
+      PathPart: "backend"
+
+  #Creating a Resource called feedback.
+  FeedbackResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MyApiGateway
+      ParentId: !GetAtt MyApiGateway.RootResourceId
+      PathPart: "feedback"
+
+  #Creating a Resource called Statut
+  StatusResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MyApiGateway
+      ParentId: !GetAtt MyApiGateway.RootResourceId
+      PathPart: "status"
+
+  # UploadResource:
+  #   Type: AWS::ApiGateway::Resource
+  #   Properties:
+  #     RestApiId: !Ref MyApiGateway
+  #     ParentId: !GetAtt MyApiGateway.RootResourceId
+  #     PathPart: "upload"
+
+  # StoreResource:
+  #   Type: AWS::ApiGateway::Resource
+  #   Properties:
+  #     RestApiId: !Ref MyApiGateway
+  #     ParentId: !GetAtt MyApiGateway.RootResourceId
+  #     PathPart: "store"
+
+  TestMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MyApiGateway
+      ResourceId: !Ref MyApiResource
+      AuthorizationType: NONE
+      HttpMethod: GET
+      Integration:
+        Type: HTTP
+        IntegrationHttpMethod: GET
+        Uri: !Sub http://${MyEC2Instance.PublicIp}:80
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseTemplates:
+              application/json: $input.json('$')
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      RequestParameters:
+        method.request.querystring.name: false
+      MethodResponses:
+        - ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+          StatusCode: "200"
+
+  # UploadMethod:
+  #   Type: AWS::ApiGateway::Method
+  #   Properties:
+  #     RestApiId: !Ref MyApiGateway
+  #     ResourceId: !Ref MyApiResource
+  #     AuthorizationType: NONE
+  #     HttpMethod: POST
+  #     Integration:
+  #       Type: HTTP
+  #       TimeoutInMillis: 29000
+  #       IntegrationHttpMethod: POST
+  #       Uri: !Sub http://${MyEC2Instance.PublicIp}:80/upload
+  #       IntegrationResponses:
+  #         - StatusCode: 200
+  #           ResponseTemplates:
+  #             application/json: $input.json('$')
+  #           ResponseParameters:
+  #             method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+  #             method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+  #             method.response.header.Access-Control-Allow-Origin: "'*'"
+  #       RequestTemplates:
+  #         application/json: $input.json('$')
+  #     RequestParameters:
+  #       method.request.querystring.name: false
+  #     MethodResponses:
+  #       - ResponseParameters:
+  #           method.response.header.Access-Control-Allow-Headers: true
+  #           method.response.header.Access-Control-Allow-Methods: true
+  #           method.response.header.Access-Control-Allow-Origin: true
+  #         StatusCode: "200"
+
+  FeedbackMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MyApiGateway
+      ResourceId: !Ref FeedbackResource
+      AuthorizationType: NONE
+      HttpMethod: POST
+      Integration:
+        Type: HTTP
+        IntegrationHttpMethod: POST
+        Uri: !Sub http://${MyEC2Instance.PublicIp}:80/publish
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseTemplates:
+              application/json: $input.json('$')
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        RequestTemplates:
+          application/json: $input.json('$')
+      RequestParameters:
+        method.request.querystring.name: false
+      MethodResponses:
+        - ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+          StatusCode: "200"
+
+  StatusMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MyApiGateway
+      ResourceId: !Ref StatusResource
+      AuthorizationType: NONE
+      HttpMethod: POST
+      Integration:
+        Type: HTTP
+        IntegrationHttpMethod: POST
+        Uri: !Sub http://${MyEC2Instance.PublicIp}:80/filecheck
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseTemplates:
+              application/json: $input.json('$')
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        RequestTemplates:
+          application/json: $input.json('$')
+      RequestParameters:
+        method.request.querystring.name: false
+      MethodResponses:
+        - ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+          StatusCode: "200"
+
+  #######################################################################
+  #3 Option Method For each resource to handle the cors error.
+  #########################################################################
+  FeedbackOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MyApiGateway
+      ResourceId: !Ref FeedbackResource
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      Integration:
+        Type: MOCK
+        PassthroughBehavior: "WHEN_NO_MATCH"
+        RequestTemplates:
+          "application/json": '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+          StatusCode: "200"
+
+  BackendOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MyApiGateway
+      ResourceId: !Ref MyApiResource
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      Integration:
+        Type: MOCK
+        TimeoutInMillis: 29000
+        PassthroughBehavior: "WHEN_NO_MATCH"
+        RequestTemplates:
+          "application/json": '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+          StatusCode: "200"
+
+  StatusOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MyApiGateway
+      ResourceId: !Ref StatusResource
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      Integration:
+        Type: MOCK
+        PassthroughBehavior: "WHEN_NO_MATCH"
+        RequestTemplates:
+          "application/json": '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+          StatusCode: "200"
+
+  ######################################################################################################
+  #Deployemnt of the API endpoints and OPTION API Methods decalred to handle the cors with the stage name
+  ####################################################################################################
+  MyApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: TestMethod
+    Properties:
+      RestApiId: !Ref MyApiGateway
+
+  MyApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      DeploymentId: !Ref MyApiDeployment
+      RestApiId: !Ref MyApiGateway
+      StageName: prod
+
+  # UploadApiDeployment:
+  #   Type: AWS::ApiGateway::Deployment
+  #   DependsOn: UploadMethod
+  #   Properties:
+  #     RestApiId: !Ref MyApiGateway
+
+  # UploadApiStage:
+  #   Type: AWS::ApiGateway::Stage
+  #   Properties:
+  #     DeploymentId: !Ref UploadApiDeployment
+  #     RestApiId: !Ref MyApiGateway
+  #     StageName: push
+
+  #Feedback API.............................
+  FeedbackApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - FeedbackMethod
+      # - FeedbackOptionsMethod
+    Properties:
+      RestApiId: !Ref MyApiGateway
+
+  FeedbackApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      DeploymentId: !Ref FeedbackApiDeployment
+      RestApiId: !Ref MyApiGateway
+      StageName: post
+
+  FeedbackOptionsApiDeployment:
+    Type: "AWS::ApiGateway::Deployment"
+    Properties:
+      RestApiId: !Ref MyApiGateway
+    DependsOn:
+      - FeedbackOptionsMethod
+
+  #Backend Test API.............................
+  BackendOptionsApiDeployment:
+    Type: "AWS::ApiGateway::Deployment"
+    Properties:
+      RestApiId: !Ref MyApiGateway
+    DependsOn:
+      - BackendOptionsMethod
+
+  #Status API.........
+  StatusOptionsApiDeployment:
+    Type: "AWS::ApiGateway::Deployment"
+    Properties:
+      RestApiId: !Ref MyApiGateway
+    DependsOn:
+      - StatusOptionsMethod
+
+  StatusApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: FeedbackMethod
+    Properties:
+      RestApiId: !Ref MyApiGateway
+
+  StatusApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      DeploymentId: !Ref StatusApiDeployment
+      RestApiId: !Ref MyApiGateway
+      StageName: fetch
+
+  ################################################################################
+  #Elastic Beanstalk Fronend.....................................
+  ################################################################################
+
+  ElasticBeanstalkApplication:
+    Type: AWS::ElasticBeanstalk::Application
+    Properties:
+      ApplicationName: "FileShareWebApp" # Fixed application name
+
+  ElasticBeanstalkEnvironment:
+    Type: AWS::ElasticBeanstalk::Environment
+    Properties:
+      ApplicationName: !Ref ElasticBeanstalkApplication
+      EnvironmentName: "FrontendEnvironment" # Fixed environment name
+      SolutionStackName: !Ref SolutionStackName
+      Tier:
+        Type: "Standard" # Web server environment tier
+        Name: "WebServer"
+      VersionLabel: !Ref SampleApplicationVersion # Using the created application version
+      OptionSettings:
+        - Namespace: "aws:elasticbeanstalk:environment"
+          OptionName: "ServiceRole"
+          Value: "arn:aws:iam::591833836406:role/LabRole" # Operations Role ARN
+        - Namespace: "aws:autoscaling:launchconfiguration"
+          OptionName: "IamInstanceProfile"
+          Value: "LabInstanceProfile" # Instance Profile name
+        - Namespace: "aws:elasticbeanstalk:environment"
+          OptionName: EnvironmentType
+          Value: "SingleInstance"
+        - Namespace: "aws:autoscaling:launchconfiguration"
+          OptionName: "InstanceType"
+          Value: "t3a.small" # Instance type - t3.small
+        - Namespace: "aws:elasticbeanstalk:application:environment"
+          OptionName: "REACT_APP_TEST"
+          Value: !Sub "https://${MyApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/backend"
+        # - Namespace: "aws:elasticbeanstalk:application:environment"
+        #   OptionName: "REACT_APP_API"
+        #   Value: !Sub "https://${MyApiGateway}.execute-api.${AWS::Region}.amazonaws.com/push/backend"
+        - Namespace: "aws:elasticbeanstalk:application:environment"
+          OptionName: "REACT_APP_FEEDBACK"
+          Value: !Sub "https://${MyApiGateway}.execute-api.${AWS::Region}.amazonaws.com/post/feedback"
+        - Namespace: "aws:elasticbeanstalk:application:environment"
+          OptionName: "REACT_APP_STATUS"
+          Value: !Sub "https://${MyApiGateway}.execute-api.${AWS::Region}.amazonaws.com/fetch/status"
+        - Namespace: "aws:elasticbeanstalk:application:environment"
+          OptionName: "REACT_APP_EC2"
+          Value: !Sub "http://${MyEC2Instance.PublicIp}:80/upload"
+        - Namespace: "aws:elasticbeanstalk:application:environment"
+          OptionName: "REACT_APP_SNS_TOPIC_ARN"
+          Value: !Ref FeedbackSNS
+      OperationsRole: "arn:aws:iam::591833836406:role/LabRole" # Specify the IAM role ARN here
+
+  SampleApplicationVersion:
+    Type: AWS::ElasticBeanstalk::ApplicationVersion
+    Properties:
+      ApplicationName: !Ref ElasticBeanstalkApplication
+      Description: Sample application version
+      SourceBundle:
+        S3Bucket: !Ref CodeBucketName # Replace with your S3 bucket name
+        S3Key: !Ref FrontendCodeKey # Replace with your S3 key
+
+Outputs:
+  ElasticBeanstalkURL:
+    Description: URL of the Elastic Beanstalk environment
+    Value: !Join
+      - ""
+      - - "http://"
+        - !GetAtt ElasticBeanstalkEnvironment.EndpointURL

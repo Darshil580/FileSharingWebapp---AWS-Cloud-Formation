@@ -1,0 +1,59 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: CloudFormation template for Elastic Beanstalk application deployment
+
+Parameters:
+  SolutionStackName:
+    Type: String
+    Default: "64bit Amazon Linux 2 v5.8.3 running Node.js 18"
+    Description: Elastic Beanstalk solution stack to use for the environment
+
+Resources:
+  ElasticBeanstalkApplication:
+    Type: AWS::ElasticBeanstalk::Application
+    Properties:
+      ApplicationName: "FileShareWebApp" # Fixed application name
+
+  ElasticBeanstalkEnvironment:
+    Type: AWS::ElasticBeanstalk::Environment
+    Properties:
+      ApplicationName: !Ref ElasticBeanstalkApplication
+      EnvironmentName: "FrontendEnvironment" # Fixed environment name
+      SolutionStackName: !Ref SolutionStackName
+      Tier:
+        Type: "Standard" # Web server environment tier
+        Name: "WebServer"
+      VersionLabel: !Ref SampleApplicationVersion # Using the created application version
+      OptionSettings:
+        - Namespace: "aws:elasticbeanstalk:environment"
+          OptionName: "ServiceRole"
+          Value: "arn:aws:iam::591833836406:role/LabRole" # Operations Role ARN
+        - Namespace: "aws:autoscaling:launchconfiguration"
+          OptionName: "IamInstanceProfile"
+          Value: "LabInstanceProfile" # Instance Profile name
+        - Namespace: "aws:elasticbeanstalk:environment"
+          OptionName: EnvironmentType
+          Value: "SingleInstance"
+        - Namespace: "aws:autoscaling:launchconfiguration"
+          OptionName: "InstanceType"
+          Value: "t3a.small" # Instance type - t3.small
+        - Namespace: "aws:elasticbeanstalk:application:environment"
+          OptionName: "API"
+          Value: !Sub "https://${MyHttpAPI}.execute-api.${AWS::Region}.amazonaws.com"
+      OperationsRole: "arn:aws:iam::591833836406:role/LabRole" # Specify the IAM role ARN here
+
+  SampleApplicationVersion:
+    Type: AWS::ElasticBeanstalk::ApplicationVersion
+    Properties:
+      ApplicationName: !Ref ElasticBeanstalkApplication
+      Description: Sample application version
+      SourceBundle:
+        S3Bucket: term-project-code # Replace with your S3 bucket name
+        S3Key: frontend.zip # Replace with your S3 key
+
+Outputs:
+  ElasticBeanstalkURL:
+    Description: URL of the Elastic Beanstalk environment
+    Value: !Join
+      - ""
+      - - "http://"
+        - !GetAtt ElasticBeanstalkEnvironment.EndpointURL

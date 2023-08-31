@@ -1,0 +1,245 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: CloudFormation Template to create an EC2 and API GateWay
+
+Parameters:
+  CodeBucketName:
+    Description: Name of the S3 bucket where your backend code is located
+    Type: String
+    Default: term-project-code
+
+  CodeObjectKey:
+    Description: Object key of the backend code in the S3 bucket
+    Type: String
+    Default: backend.zip
+
+  MyEC2KeyPair:
+    Description: Name of an existing EC2 KeyPair to enable SSH access
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: darshil
+
+  ACCESSKEY:
+    Type: String
+    Default: ASIAYTTALVN3E4BMSA7B
+
+  SECRETACCESS:
+    Type: String
+    Default: GuMasprwC80Xze7DHrss1loYKule+ZUmqq2bWafJ
+
+  SESSION:
+    Type: String
+    Default: FwoGZXIvYXdzEDkaDPG8IcQniLOJlnFfSCLAAQGKpYJUEfN6TFy6qmvqv6rapDO7eXRoobAhK186hqzcxGENdWYMTz9YkSt0hW99Px9dYGezskmtZmnhOgsIawXb5fgO30WD6gG3u+z/gvnpxMzZ5Zgrm3awfqd3/qAKjpBiUJICEiGjwlmPpXQsifkQDqfjEj7n+5QFqn/ZOb25/2+YIpZbrwInN8bzhhgChBam+yo0YOSHJZSMk0UwRJIwDsAilpjEo3QF483XM7rYHDVgJUNrSCeujtr8k2pTLyjRq5+mBjItyCiPZHmQ5mVLFEeiqNFLwtu07pfjj1hN7TrL5x4IZVgD3JFqwnqjTeqYllWG
+
+Resources:
+  MyEC2Instance:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      ImageId: "ami-0f34c5ae932e6f0e4" # Amazon Linux 2 AMI (Free Tier eligible)
+      InstanceType: "t2.micro" # t2.micro instance type (Free Tier eligible)
+      KeyName: !Ref MyEC2KeyPair # Reference the created key pair here
+      Tags:
+        - Key: Name
+          Value: term-project-backend # Replace with your desired instance name
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          cd /home/ec2-user/
+          # Install Node.js 18.x using yum
+          curl -sL https://rpm.nodesource.com/setup_18.x | bash -
+          yum install -y nodejs
+          sudo yum install git -y
+
+          #!/bin/bash
+          echo export aws_access_key_id=${ACCESSKEY} >> /etc/profile
+          echo export aws_secret_access_key=${SECRETACCESS} >> /etc/profile
+          echo export aws_session_token=${SESSION} >> /etc/profile
+          sudo mkdir .aws
+          sudo chown -R ec2-user: .aws
+          sudo chmod -R 755 .aws
+
+          echo -e "[default]\naws_access_key_id=${ACCESSKEY}\naws_secret_access_key=${SECRETACCESS}\naws_session_token=${SESSION}" > .aws/credentials
+          sudo aws configure set aws_access_key_id $aws_access_key_id
+          sudo aws configure set aws_secret_access_key $aws_secret_access_key
+          sudo aws configure set region us-east-1
+          sudo aws configure set aws_session_token $aws_session_token
+
+          echo "[default]" >> ~/.aws/credentials
+          echo "aws_access_key_id=${ACCESSKEY}" >> ~/.aws/credentials
+          echo "aws_secret_access_key=${SECRETACCESS}" >> ~/.aws/credentials
+          echo "aws_session_token=${SESSION}" >> ~/.aws/credentials
+
+          sudo aws s3 cp s3://term-project-code/backend.zip ./
+          # git clone https://github.com/Darshil580/term-backend.git
+
+          sudo unzip backend.zip -d /home/ec2-user/backend
+          cd backend
+          # cd term-backend/
+
+          sudo npm install
+          sudo npm install -g pm2
+          sudo pm2 install pm2-logrotate
+          sudo pm2 start app.js --name node-app
+          # sudo aws s3 cp s3://term-project-code/backend.zip ./ &
+
+  MyApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: backend-server
+
+  MyApiResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MyApiGateway
+      ParentId: !GetAtt MyApiGateway.RootResourceId
+      PathPart: "backend"
+
+  UploadResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MyApiGateway
+      ParentId: !GetAtt MyApiGateway.RootResourceId
+      PathPart: "upload"
+
+  StoreResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MyApiGateway
+      ParentId: !GetAtt MyApiGateway.RootResourceId
+      PathPart: "store"
+
+  TestMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MyApiGateway
+      ResourceId: !Ref MyApiResource
+      AuthorizationType: NONE
+      HttpMethod: GET
+      Integration:
+        Type: HTTP
+        IntegrationHttpMethod: GET
+        Uri: !Sub http://${MyEC2Instance.PublicIp}:80
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseTemplates:
+              application/json: $input.json('$')
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      RequestParameters:
+        method.request.querystring.name: false
+      MethodResponses:
+        - ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+          StatusCode: "200"
+
+  UploadMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MyApiGateway
+      ResourceId: !Ref UploadResource
+      AuthorizationType: NONE
+      HttpMethod: POST
+      Integration:
+        Type: HTTP
+        IntegrationHttpMethod: POST
+        Uri: !Sub http://${MyEC2Instance.PublicIp}:80/upload
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseTemplates:
+              application/json: $input.json('$')
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        RequestTemplates:
+          application/json: $input.json('$')
+      RequestParameters:
+        method.request.querystring.name: false
+      MethodResponses:
+        - ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+          StatusCode: "200"
+
+  # StoreMethod:
+  #   Type: AWS::ApiGateway::Method
+  #   Properties:
+  #     RestApiId: !Ref MyApiGateway
+  #     ResourceId: !Ref StoreResource
+  #     AuthorizationType: NONE
+  #     HttpMethod: POST
+  #     Integration:
+  #       Type: HTTP
+  #       IntegrationHttpMethod: POST
+  #       Uri: !Sub http://${MyEC2Instance.PublicIp}:80/store
+  #       IntegrationResponses:
+  #         - StatusCode: 200
+  #           ResponseTemplates:
+  #             application/json: $input.json('$')
+  #           ResponseParameters:
+  #             method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+  #             method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+  #             method.response.header.Access-Control-Allow-Origin: "'*'"
+  #       RequestTemplates:
+  #         application/json: $input.json('$')
+  #     RequestParameters:
+  #       method.request.querystring.name: false
+  #     MethodResponses:
+  #       - ResponseParameters:
+  #           method.response.header.Access-Control-Allow-Headers: true
+  #           method.response.header.Access-Control-Allow-Methods: true
+  #           method.response.header.Access-Control-Allow-Origin: true
+  #         StatusCode: "200"
+
+  MyApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: TestMethod
+    Properties:
+      RestApiId: !Ref MyApiGateway
+
+  MyApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      DeploymentId: !Ref MyApiDeployment
+      RestApiId: !Ref MyApiGateway
+      StageName: prod
+
+  # StoreApiDeployment:
+  #   Type: AWS::ApiGateway::Deployment
+  #   DependsOn: StoreMethod
+  #   Properties:
+  #     RestApiId: !Ref MyApiGateway
+
+  # StoreApiStage:
+  #   Type: AWS::ApiGateway::Stage
+  #   Properties:
+  #     DeploymentId: !Ref StoreApiDeployment
+  #     RestApiId: !Ref MyApiGateway
+  #     StageName: save
+
+  UploadApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: UploadMethod
+    Properties:
+      RestApiId: !Ref MyApiGateway
+
+  UploadApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      DeploymentId: !Ref UploadApiDeployment
+      RestApiId: !Ref MyApiGateway
+      StageName: push
+
+  # MyApiResourceDeployment:
+  #   Type: AWS::ApiGateway::Deployment
+  #   Properties:
+  #     RestApiId: !Ref MyApiGateway
+  #     StageName: prod
+
+Outputs:
+  ApiEndpoint:
+    Description: Endpoint URL of the API Gateway
+    Value: !Sub "https://${MyApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/backend"

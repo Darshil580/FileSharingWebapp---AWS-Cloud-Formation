@@ -1,0 +1,36 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation Template to create lambda connected to Event Bridge
+
+  Resources:
+    CronWork:
+      Type: AWS::Lambda::Function
+      Properties:
+        FunctionName: CronWork
+        Runtime: nodejs18.x
+        Handler: index.handler # Replace with your Lambda function's handler
+        Code:
+          S3Bucket: term-project-code # Replace with your actual S3 bucket name
+          S3Key: index.zip
+          # ZipFile: |
+          #   # Your Lambda function code goes here
+        Timeout: 30 # Maximum execution time for the Lambda function (in seconds)
+        # Role: !GetAtt CronWorkExecutionRole.Arn
+        Role: "arn:aws:iam::591833836406:role/LabRole"
+
+    CronJobScheduler:
+      Type: AWS::Events::Rule
+      Properties:
+        Description: "Trigger Lambda every single minute"
+        ScheduleExpression: "rate(1 minute)"
+        State: ENABLED
+        Targets:
+          - Arn: !GetAtt CronWork.Arn
+            Id: CronWorkTarget
+
+    CronJobSchedulerPermission:
+      Type: AWS::Lambda::Permission
+      Properties:
+        FunctionName: !GetAtt CronWork.Arn
+        Action: "lambda:InvokeFunction"
+        Principal: events.amazonaws.com
+        SourceArn: !GetAtt CronJobScheduler.Arn

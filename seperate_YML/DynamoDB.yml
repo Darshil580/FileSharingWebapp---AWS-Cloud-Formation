@@ -1,0 +1,17 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: CloudFormation template to create a DynamoDB table for storing access codes with associated names, emails, timestamps, and status.
+
+Resources:
+  StorageRecordsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: files_metadata
+      AttributeDefinitions:
+        - AttributeName: accessCode
+          AttributeType: S
+      KeySchema:
+        - AttributeName: accessCode
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1 # Adjumst this value based on your workload
